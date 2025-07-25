@@ -1,112 +1,186 @@
 import { Request, Response, NextFunction } from 'express';
-import { logger, logError } from '../utils/logger';
+import { logger, securityLogger } from '../utils/logger';
 
-export interface AppError extends Error {
-  statusCode?: number;
-  isOperational?: boolean;
-  code?: string;
-}
-
-export class CustomError extends Error implements AppError {
+// Custom error classes
+export class AppError extends Error {
   public statusCode: number;
   public isOperational: boolean;
   public code?: string;
 
-  constructor(message: string, statusCode: number = 500, code?: string) {
+  constructor(message: string, statusCode: number, code?: string, isOperational = true) {
     super(message);
     this.statusCode = statusCode;
-    this.isOperational = true;
+    this.isOperational = isOperational;
     this.code = code;
 
     Error.captureStackTrace(this, this.constructor);
   }
 }
 
-export class ValidationError extends CustomError {
-  constructor(message: string, code?: string) {
+export class ValidationError extends AppError {
+  constructor(message: string, code = 'VALIDATION_ERROR') {
     super(message, 400, code);
   }
 }
 
-export class AuthenticationError extends CustomError {
-  constructor(message: string = 'Authentication failed', code?: string) {
+export class AuthenticationError extends AppError {
+  constructor(message = 'Authentication required', code = 'AUTHENTICATION_ERROR') {
     super(message, 401, code);
   }
 }
 
-export class AuthorizationError extends CustomError {
-  constructor(message: string = 'Access denied', code?: string) {
+export class AuthorizationError extends AppError {
+  constructor(message = 'Insufficient permissions', code = 'AUTHORIZATION_ERROR') {
     super(message, 403, code);
   }
 }
 
-export class NotFoundError extends CustomError {
-  constructor(message: string = 'Resource not found', code?: string) {
+export class NotFoundError extends AppError {
+  constructor(message = 'Resource not found', code = 'NOT_FOUND_ERROR') {
     super(message, 404, code);
   }
 }
 
-export class ConflictError extends CustomError {
-  constructor(message: string = 'Resource conflict', code?: string) {
+export class ConflictError extends AppError {
+  constructor(message: string, code = 'CONFLICT_ERROR') {
     super(message, 409, code);
   }
 }
 
-export class RateLimitError extends CustomError {
-  constructor(message: string = 'Too many requests', code?: string) {
+export class RateLimitError extends AppError {
+  constructor(message = 'Too many requests', code = 'RATE_LIMIT_ERROR') {
     super(message, 429, code);
   }
 }
 
+export class DatabaseError extends AppError {
+  constructor(message: string, code = 'DATABASE_ERROR') {
+    super(message, 500, code);
+  }
+}
+
+// Error response interface
+interface ErrorResponse {
+  success: false;
+  error: {
+    message: string;
+    code?: string;
+    statusCode: number;
+    timestamp: string;
+    path: string;
+    method: string;
+    requestId?: string;
+  };
+  stack?: string;
+}
+
+// Error handler middleware
 export const errorHandler = (
-  error: AppError,
+  error: Error | AppError,
   req: Request,
   res: Response,
   next: NextFunction
 ): void => {
-  let { statusCode = 500, message } = error;
+  const requestId = req.headers['x-request-id'] as string;
+  const timestamp = new Date().toISOString();
+  const path = req.path;
+  const method = req.method;
 
-  // Log the error
-  logError(error, req.path, req.user?.id);
+  // Default error response
+  let statusCode = 500;
+  let message = 'Internal Server Error';
+  let code = 'INTERNAL_SERVER_ERROR';
+  let isOperational = false;
 
-  // Handle specific error types
-  if (error.name === 'ValidationError') {
+  // Handle different error types
+  if (error instanceof AppError) {
+    statusCode = error.statusCode;
+    message = error.message;
+    code = error.code || 'APP_ERROR';
+    isOperational = error.isOperational;
+  } else if (error.name === 'ValidationError') {
     statusCode = 400;
-    message = 'Validation failed';
+    message = 'Validation Error';
+    code = 'VALIDATION_ERROR';
+    isOperational = true;
   } else if (error.name === 'CastError') {
     statusCode = 400;
     message = 'Invalid ID format';
-  } else if (error.name === 'MongoError' || error.name === 'MongoServerError') {
-    if ((error as any).code === 11000) {
-      statusCode = 409;
-      message = 'Duplicate field value';
-    }
+    code = 'INVALID_ID_ERROR';
+    isOperational = true;
+  } else if (error.name === 'MongoError' || error.name === 'MongooseError') {
+    statusCode = 500;
+    message = 'Database Error';
+    code = 'DATABASE_ERROR';
+    isOperational = true;
   } else if (error.name === 'JsonWebTokenError') {
     statusCode = 401;
     message = 'Invalid token';
+    code = 'INVALID_TOKEN_ERROR';
+    isOperational = true;
   } else if (error.name === 'TokenExpiredError') {
     statusCode = 401;
     message = 'Token expired';
-  } else if (error.name === 'MulterError') {
+    code = 'TOKEN_EXPIRED_ERROR';
+    isOperational = true;
+  } else if (error.name === 'SyntaxError' && 'body' in error) {
     statusCode = 400;
-    message = 'File upload error';
+    message = 'Invalid JSON format';
+    code = 'INVALID_JSON_ERROR';
+    isOperational = true;
   }
 
-  // Don't leak error details in production
-  if (process.env.NODE_ENV === 'production' && statusCode === 500) {
-    message = 'Internal server error';
+  // Log error details
+  const errorDetails = {
+    message: error.message,
+    stack: error.stack,
+    statusCode,
+    code,
+    path,
+    method,
+    requestId,
+    userId: (req as any).user?.id,
+    userAgent: req.get('User-Agent'),
+    ip: req.ip,
+    timestamp,
+  };
+
+  // Log based on error type and severity
+  if (statusCode >= 500) {
+    logger.error('Server Error', errorDetails);
+  } else if (statusCode === 401 || statusCode === 403) {
+    securityLogger.log('Security Error', errorDetails);
+  } else {
+    logger.warn('Client Error', errorDetails);
+  }
+
+  // Prepare error response
+  const errorResponse: ErrorResponse = {
+    success: false,
+    error: {
+      message,
+      code,
+      statusCode,
+      timestamp,
+      path,
+      method,
+      requestId,
+    },
+  };
+
+  // Include stack trace in development
+  if (process.env.NODE_ENV === 'development') {
+    errorResponse.stack = error.stack;
   }
 
   // Send error response
-  res.status(statusCode).json({
-    success: false,
-    error: message,
-    code: error.code,
-    ...(process.env.NODE_ENV === 'development' && {
-      stack: error.stack,
-      details: error.message,
-    }),
-  });
+  res.status(statusCode).json(errorResponse);
+
+  // Handle non-operational errors
+  if (!isOperational) {
+    logger.error('Non-operational error detected, shutting down gracefully');
+    process.exit(1);
+  }
 };
 
 // Async error wrapper
@@ -117,87 +191,63 @@ export const asyncHandler = (fn: Function) => {
 };
 
 // 404 handler
-export const notFoundHandler = (req: Request, res: Response, next: NextFunction): void => {
+export const notFoundHandler = (req: Request, res: Response): void => {
   const error = new NotFoundError(`Route ${req.originalUrl} not found`);
-  next(error);
-};
-
-// Validation error handler
-export const handleValidationError = (error: any): CustomError => {
-  const errors = Object.values(error.errors).map((err: any) => err.message);
-  const message = `Invalid input data: ${errors.join('. ')}`;
-  return new ValidationError(message);
-};
-
-// Database error handler
-export const handleDatabaseError = (error: any): CustomError => {
-  if (error.code === '23505') { // Unique constraint violation
-    return new ConflictError('Duplicate entry found');
-  } else if (error.code === '23503') { // Foreign key constraint violation
-    return new ValidationError('Referenced record does not exist');
-  } else if (error.code === '23502') { // Not null constraint violation
-    return new ValidationError('Required field is missing');
-  } else if (error.code === '22P02') { // Invalid text representation
-    return new ValidationError('Invalid data format');
-  }
-  
-  return new CustomError('Database operation failed', 500);
-};
-
-// File upload error handler
-export const handleFileUploadError = (error: any): CustomError => {
-  if (error.code === 'LIMIT_FILE_SIZE') {
-    return new ValidationError('File size too large');
-  } else if (error.code === 'LIMIT_FILE_COUNT') {
-    return new ValidationError('Too many files uploaded');
-  } else if (error.code === 'LIMIT_UNEXPECTED_FILE') {
-    return new ValidationError('Unexpected file field');
-  }
-  
-  return new CustomError('File upload failed', 500);
-};
-
-// Rate limiting error handler
-export const handleRateLimitError = (error: any): CustomError => {
-  return new RateLimitError('Too many requests from this IP');
-};
-
-// Global error handler for unhandled rejections
-export const handleUnhandledRejection = (reason: any, promise: Promise<any>): void => {
-  logger.error('Unhandled Rejection at:', promise, 'reason:', reason);
-  process.exit(1);
-};
-
-// Global error handler for uncaught exceptions
-export const handleUncaughtException = (error: Error): void => {
-  logger.error('Uncaught Exception:', error);
-  process.exit(1);
-};
-
-// Request timeout handler
-export const timeoutHandler = (timeout: number) => {
-  return (req: Request, res: Response, next: NextFunction) => {
-    const timer = setTimeout(() => {
-      const error = new CustomError('Request timeout', 408);
-      next(error);
-    }, timeout);
-
-    res.on('finish', () => {
-      clearTimeout(timer);
-    });
-
-    next();
-  };
-};
-
-// Response time logging middleware
-export const responseTimeLogger = (req: Request, res: Response, next: NextFunction): void => {
-  const start = Date.now();
-  
-  res.on('finish', () => {
-    const duration = Date.now() - start;
-    logger.info(`${req.method} ${req.originalUrl} - ${res.statusCode} - ${duration}ms`);
+  res.status(404).json({
+    success: false,
+    error: {
+      message: error.message,
+      code: error.code,
+      statusCode: error.statusCode,
+      timestamp: new Date().toISOString(),
+      path: req.path,
+      method: req.method,
+      requestId: req.headers['x-request-id'] as string,
+    },
   });
+};
+
+// Request validation error handler
+export const validationErrorHandler = (error: any, req: Request, res: Response, next: NextFunction): void => {
+  if (error && error.isJoi) {
+    const validationError = new ValidationError(
+      error.details.map((detail: any) => detail.message).join(', '),
+      'VALIDATION_ERROR'
+    );
+    
+    res.status(400).json({
+      success: false,
+      error: {
+        message: validationError.message,
+        code: validationError.code,
+        statusCode: validationError.statusCode,
+        timestamp: new Date().toISOString(),
+        path: req.path,
+        method: req.method,
+        requestId: req.headers['x-request-id'] as string,
+        details: error.details,
+      },
+    });
+  } else {
+    next(error);
+  }
+};
+
+// Rate limit error handler
+export const rateLimitErrorHandler = (req: Request, res: Response, next: NextFunction): void => {
+  const error = new RateLimitError('Too many requests from this IP');
   
-  next();
+  res.status(429).json({
+    success: false,
+    error: {
+      message: error.message,
+      code: error.code,
+      statusCode: error.statusCode,
+      timestamp: new Date().toISOString(),
+      path: req.path,
+      method: req.method,
+      requestId: req.headers['x-request-id'] as string,
+      retryAfter: Math.ceil(parseInt(process.env.RATE_LIMIT_WINDOW_MS || '900000') / 1000),
+    },
+  });
 }; 

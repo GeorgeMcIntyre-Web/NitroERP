@@ -1,132 +1,167 @@
 import winston from 'winston';
-import path from 'path';
-import fs from 'fs';
+import DailyRotateFile from 'winston-daily-rotate-file';
+import config from '../../config/environment';
 
-// Ensure logs directory exists
-const logsDir = path.join(process.cwd(), 'logs');
-if (!fs.existsSync(logsDir)) {
-  fs.mkdirSync(logsDir, { recursive: true });
-}
-
-// Define log format
+// Custom log format
 const logFormat = winston.format.combine(
   winston.format.timestamp({
     format: 'YYYY-MM-DD HH:mm:ss',
   }),
   winston.format.errors({ stack: true }),
   winston.format.json(),
-  winston.format.prettyPrint()
-);
-
-// Define console format for development
-const consoleFormat = winston.format.combine(
-  winston.format.colorize(),
-  winston.format.timestamp({
-    format: 'YYYY-MM-DD HH:mm:ss',
-  }),
-  winston.format.printf(({ timestamp, level, message, ...meta }) => {
-    let log = `${timestamp} [${level}]: ${message}`;
-    if (Object.keys(meta).length > 0) {
-      log += ` ${JSON.stringify(meta, null, 2)}`;
+  winston.format.printf(({ timestamp, level, message, stack, ...meta }) => {
+    let log = `${timestamp} [${level.toUpperCase()}]: ${message}`;
+    
+    if (stack) {
+      log += `\n${stack}`;
     }
+    
+    if (Object.keys(meta).length > 0) {
+      log += `\n${JSON.stringify(meta, null, 2)}`;
+    }
+    
     return log;
   })
 );
 
-// Create logger instance
-const logger = winston.createLogger({
-  level: process.env.LOG_LEVEL || 'info',
-  format: logFormat,
-  defaultMeta: { service: 'nitroerp' },
-  transports: [
-    // Write all logs with level 'error' and below to error.log
-    new winston.transports.File({
-      filename: path.join(logsDir, 'error.log'),
-      level: 'error',
-      maxsize: 5242880, // 5MB
-      maxFiles: 5,
-    }),
-    // Write all logs with level 'info' and below to combined.log
-    new winston.transports.File({
-      filename: path.join(logsDir, 'combined.log'),
-      maxsize: 5242880, // 5MB
-      maxFiles: 5,
-    }),
-  ],
-});
+// Console format for development
+const consoleFormat = winston.format.combine(
+  winston.format.colorize(),
+  winston.format.timestamp({
+    format: 'HH:mm:ss',
+  }),
+  winston.format.printf(({ timestamp, level, message, stack, ...meta }) => {
+    let log = `${timestamp} [${level}]: ${message}`;
+    
+    if (stack) {
+      log += `\n${stack}`;
+    }
+    
+    if (Object.keys(meta).length > 0) {
+      log += `\n${JSON.stringify(meta, null, 2)}`;
+    }
+    
+    return log;
+  })
+);
 
-// If we're not in production, log to console as well
-if (process.env.NODE_ENV !== 'production') {
-  logger.add(
-    new winston.transports.Console({
-      format: consoleFormat,
+// Create transports
+const transports: winston.transport[] = [];
+
+// Console transport for all environments
+transports.push(
+  new winston.transports.Console({
+    format: config.NODE_ENV === 'development' ? consoleFormat : logFormat,
+    level: config.LOG_LEVEL,
+  })
+);
+
+// File transport for production and staging
+if (config.NODE_ENV !== 'development') {
+  // Daily rotate file transport
+  transports.push(
+    new DailyRotateFile({
+      filename: config.LOG_FILE.replace('.log', '-%DATE%.log'),
+      datePattern: 'YYYY-MM-DD',
+      maxSize: '20m',
+      maxFiles: '14d',
+      level: config.LOG_LEVEL,
+      format: logFormat,
+    })
+  );
+
+  // Error log file
+  transports.push(
+    new DailyRotateFile({
+      filename: config.LOG_FILE.replace('.log', '-error-%DATE%.log'),
+      datePattern: 'YYYY-MM-DD',
+      maxSize: '20m',
+      maxFiles: '30d',
+      level: 'error',
+      format: logFormat,
     })
   );
 }
 
+// Create logger instance
+const logger = winston.createLogger({
+  level: config.LOG_LEVEL,
+  format: logFormat,
+  transports,
+  exitOnError: false,
+});
+
 // Create a stream object for Morgan HTTP logging
-export const logStream = {
+export const stream = {
   write: (message: string) => {
     logger.info(message.trim());
   },
 };
 
-// Export logger instance
-export { logger };
+// Custom logger methods for different contexts
+export const createLogger = (context: string) => ({
+  info: (message: string, meta?: any) => logger.info(message, { context, ...meta }),
+  error: (message: string, meta?: any) => logger.error(message, { context, ...meta }),
+  warn: (message: string, meta?: any) => logger.warn(message, { context, ...meta }),
+  debug: (message: string, meta?: any) => logger.debug(message, { context, ...meta }),
+  verbose: (message: string, meta?: any) => logger.verbose(message, { context, ...meta }),
+});
 
-// Helper functions for specific logging scenarios
-export const logUserAction = (userId: string, action: string, details?: any) => {
-  logger.info('User Action', {
-    userId,
-    action,
-    details,
-    timestamp: new Date().toISOString(),
-  });
+// Performance logging utility
+export const performanceLogger = {
+  start: (operation: string) => {
+    const startTime = Date.now();
+    return {
+      end: (meta?: any) => {
+        const duration = Date.now() - startTime;
+        logger.info(`${operation} completed in ${duration}ms`, { 
+          operation, 
+          duration, 
+          ...meta 
+        });
+        return duration;
+      },
+    };
+  },
 };
 
-export const logSystemEvent = (event: string, details?: any) => {
-  logger.info('System Event', {
-    event,
-    details,
-    timestamp: new Date().toISOString(),
-  });
+// Audit logging utility
+export const auditLogger = {
+  log: (action: string, userId: string, resource: string, details?: any) => {
+    logger.info('Audit log', {
+      action,
+      userId,
+      resource,
+      timestamp: new Date().toISOString(),
+      ...details,
+    });
+  },
 };
 
-export const logSecurityEvent = (event: string, userId?: string, details?: any) => {
-  logger.warn('Security Event', {
-    event,
-    userId,
-    details,
-    timestamp: new Date().toISOString(),
-  });
+// Security logging utility
+export const securityLogger = {
+  log: (event: string, details: any) => {
+    logger.warn('Security event', {
+      event,
+      timestamp: new Date().toISOString(),
+      ...details,
+    });
+  },
 };
 
-export const logDatabaseQuery = (query: string, duration: number, params?: any) => {
-  logger.debug('Database Query', {
-    query,
-    duration: `${duration}ms`,
-    params,
-    timestamp: new Date().toISOString(),
-  });
-};
+// Database logging utility
+export const dbLogger = createLogger('Database');
 
-export const logApiRequest = (method: string, url: string, statusCode: number, duration: number, userId?: string) => {
-  logger.info('API Request', {
-    method,
-    url,
-    statusCode,
-    duration: `${duration}ms`,
-    userId,
-    timestamp: new Date().toISOString(),
-  });
-};
+// API logging utility
+export const apiLogger = createLogger('API');
 
-export const logError = (error: Error, context?: string, userId?: string) => {
-  logger.error('Application Error', {
-    error: error.message,
-    stack: error.stack,
-    context,
-    userId,
-    timestamp: new Date().toISOString(),
-  });
-}; 
+// Workflow logging utility
+export const workflowLogger = createLogger('Workflow');
+
+// Notification logging utility
+export const notificationLogger = createLogger('Notification');
+
+// Exchange rate logging utility
+export const exchangeRateLogger = createLogger('ExchangeRate');
+
+export { logger }; 
