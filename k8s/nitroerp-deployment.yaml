@@ -1,0 +1,942 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: nitroerp
+  labels:
+    name: nitroerp
+---
+# =====================================================
+# CONFIGMAPS
+# =====================================================
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nitroerp-config
+  namespace: nitroerp
+data:
+  NODE_ENV: "production"
+  DB_HOST: "nitroerp-postgres"
+  DB_PORT: "5432"
+  DB_NAME: "nitroerp"
+  REDIS_HOST: "nitroerp-redis"
+  REDIS_PORT: "6379"
+  RABBITMQ_HOST: "nitroerp-rabbitmq"
+  RABBITMQ_PORT: "5672"
+  MINIO_HOST: "nitroerp-minio"
+  MINIO_PORT: "9000"
+  SARB_API_URL: "https://www.resbank.co.za/api/exchangerates"
+  ECB_API_URL: "https://api.exchangerate.host/latest"
+---
+# =====================================================
+# SECRETS
+# =====================================================
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: nitroerp-secrets
+  namespace: nitroerp
+type: Opaque
+data:
+  DB_PASSWORD: cGFzc3dvcmQ=  # password (base64 encoded)
+  JWT_SECRET: eW91ci1zZWNyZXQta2V5  # your-secret-key (base64 encoded)
+  RABBITMQ_PASSWORD: cGFzc3dvcmQ=  # password (base64 encoded)
+  MINIO_PASSWORD: cGFzc3dvcmQ=  # password (base64 encoded)
+---
+# =====================================================
+# INFRASTRUCTURE SERVICES
+# =====================================================
+
+# PostgreSQL Database
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: nitroerp-postgres
+  namespace: nitroerp
+spec:
+  serviceName: nitroerp-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nitroerp-postgres
+  template:
+    metadata:
+      labels:
+        app: nitroerp-postgres
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:15-alpine
+        ports:
+        - containerPort: 5432
+        env:
+        - name: POSTGRES_DB
+          value: "nitroerp"
+        - name: POSTGRES_USER
+          value: "nitroerp_user"
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: nitroerp-secrets
+              key: DB_PASSWORD
+        volumeMounts:
+        - name: postgres-storage
+          mountPath: /var/lib/postgresql/data
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+  volumeClaimTemplates:
+  - metadata:
+      name: postgres-storage
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 10Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nitroerp-postgres
+  namespace: nitroerp
+spec:
+  selector:
+    app: nitroerp-postgres
+  ports:
+  - port: 5432
+    targetPort: 5432
+  type: ClusterIP
+---
+# Redis Cache
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nitroerp-redis
+  namespace: nitroerp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nitroerp-redis
+  template:
+    metadata:
+      labels:
+        app: nitroerp-redis
+    spec:
+      containers:
+      - name: redis
+        image: redis:7-alpine
+        ports:
+        - containerPort: 6379
+        command: ["redis-server", "--appendonly", "yes"]
+        volumeMounts:
+        - name: redis-storage
+          mountPath: /data
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+      volumes:
+      - name: redis-storage
+        persistentVolumeClaim:
+          claimName: nitroerp-redis-pvc
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nitroerp-redis-pvc
+  namespace: nitroerp
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nitroerp-redis
+  namespace: nitroerp
+spec:
+  selector:
+    app: nitroerp-redis
+  ports:
+  - port: 6379
+    targetPort: 6379
+  type: ClusterIP
+---
+# RabbitMQ Message Queue
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nitroerp-rabbitmq
+  namespace: nitroerp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nitroerp-rabbitmq
+  template:
+    metadata:
+      labels:
+        app: nitroerp-rabbitmq
+    spec:
+      containers:
+      - name: rabbitmq
+        image: rabbitmq:3-management-alpine
+        ports:
+        - containerPort: 5672
+        - containerPort: 15672
+        env:
+        - name: RABBITMQ_DEFAULT_USER
+          value: "nitroerp"
+        - name: RABBITMQ_DEFAULT_PASS
+          valueFrom:
+            secretKeyRef:
+              name: nitroerp-secrets
+              key: RABBITMQ_PASSWORD
+        volumeMounts:
+        - name: rabbitmq-storage
+          mountPath: /var/lib/rabbitmq
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+      volumes:
+      - name: rabbitmq-storage
+        persistentVolumeClaim:
+          claimName: nitroerp-rabbitmq-pvc
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nitroerp-rabbitmq-pvc
+  namespace: nitroerp
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nitroerp-rabbitmq
+  namespace: nitroerp
+spec:
+  selector:
+    app: nitroerp-rabbitmq
+  ports:
+  - name: amqp
+    port: 5672
+    targetPort: 5672
+  - name: management
+    port: 15672
+    targetPort: 15672
+  type: ClusterIP
+---
+# MinIO File Storage
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nitroerp-minio
+  namespace: nitroerp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nitroerp-minio
+  template:
+    metadata:
+      labels:
+        app: nitroerp-minio
+    spec:
+      containers:
+      - name: minio
+        image: minio/minio:latest
+        ports:
+        - containerPort: 9000
+        - containerPort: 9001
+        command: ["server", "/data", "--console-address", ":9001"]
+        env:
+        - name: MINIO_ROOT_USER
+          value: "nitroerp"
+        - name: MINIO_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: nitroerp-secrets
+              key: MINIO_PASSWORD
+        volumeMounts:
+        - name: minio-storage
+          mountPath: /data
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+      volumes:
+      - name: minio-storage
+        persistentVolumeClaim:
+          claimName: nitroerp-minio-pvc
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nitroerp-minio-pvc
+  namespace: nitroerp
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nitroerp-minio
+  namespace: nitroerp
+spec:
+  selector:
+    app: nitroerp-minio
+  ports:
+  - name: api
+    port: 9000
+    targetPort: 9000
+  - name: console
+    port: 9001
+    targetPort: 9001
+  type: ClusterIP
+---
+# =====================================================
+# CORE SERVICES
+# =====================================================
+
+# API Gateway
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nitroerp-api-gateway
+  namespace: nitroerp
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: nitroerp-api-gateway
+  template:
+    metadata:
+      labels:
+        app: nitroerp-api-gateway
+    spec:
+      containers:
+      - name: api-gateway
+        image: nitroerp/api-gateway:latest
+        ports:
+        - containerPort: 80
+        envFrom:
+        - configMapRef:
+            name: nitroerp-config
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 80
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 80
+          initialDelaySeconds: 5
+          periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nitroerp-api-gateway
+  namespace: nitroerp
+spec:
+  selector:
+    app: nitroerp-api-gateway
+  ports:
+  - port: 80
+    targetPort: 80
+  type: LoadBalancer
+---
+# Authentication Service
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nitroerp-auth-service
+  namespace: nitroerp
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: nitroerp-auth-service
+  template:
+    metadata:
+      labels:
+        app: nitroerp-auth-service
+    spec:
+      containers:
+      - name: auth-service
+        image: nitroerp/auth-service:latest
+        ports:
+        - containerPort: 3001
+        envFrom:
+        - configMapRef:
+            name: nitroerp-config
+        - secretRef:
+            name: nitroerp-secrets
+        env:
+        - name: PORT
+          value: "3001"
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3001
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 3001
+          initialDelaySeconds: 5
+          periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nitroerp-auth-service
+  namespace: nitroerp
+spec:
+  selector:
+    app: nitroerp-auth-service
+  ports:
+  - port: 3001
+    targetPort: 3001
+  type: ClusterIP
+---
+# User Service
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nitroerp-user-service
+  namespace: nitroerp
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: nitroerp-user-service
+  template:
+    metadata:
+      labels:
+        app: nitroerp-user-service
+    spec:
+      containers:
+      - name: user-service
+        image: nitroerp/user-service:latest
+        ports:
+        - containerPort: 3002
+        envFrom:
+        - configMapRef:
+            name: nitroerp-config
+        - secretRef:
+            name: nitroerp-secrets
+        env:
+        - name: PORT
+          value: "3002"
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3002
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 3002
+          initialDelaySeconds: 5
+          periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nitroerp-user-service
+  namespace: nitroerp
+spec:
+  selector:
+    app: nitroerp-user-service
+  ports:
+  - port: 3002
+    targetPort: 3002
+  type: ClusterIP
+---
+# Company Service
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nitroerp-company-service
+  namespace: nitroerp
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: nitroerp-company-service
+  template:
+    metadata:
+      labels:
+        app: nitroerp-company-service
+    spec:
+      containers:
+      - name: company-service
+        image: nitroerp/company-service:latest
+        ports:
+        - containerPort: 3003
+        envFrom:
+        - configMapRef:
+            name: nitroerp-config
+        - secretRef:
+            name: nitroerp-secrets
+        env:
+        - name: PORT
+          value: "3003"
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3003
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 3003
+          initialDelaySeconds: 5
+          periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nitroerp-company-service
+  namespace: nitroerp
+spec:
+  selector:
+    app: nitroerp-company-service
+  ports:
+  - port: 3003
+    targetPort: 3003
+  type: ClusterIP
+---
+# =====================================================
+# BUSINESS MODULES (Optional - Deploy as needed)
+# =====================================================
+
+# Financial Module
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nitroerp-financial-service
+  namespace: nitroerp
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: nitroerp-financial-service
+  template:
+    metadata:
+      labels:
+        app: nitroerp-financial-service
+    spec:
+      containers:
+      - name: financial-service
+        image: nitroerp/financial-service:latest
+        ports:
+        - containerPort: 3010
+        envFrom:
+        - configMapRef:
+            name: nitroerp-config
+        - secretRef:
+            name: nitroerp-secrets
+        env:
+        - name: PORT
+          value: "3010"
+        - name: AUTH_SERVICE_URL
+          value: "http://nitroerp-auth-service:3001"
+        - name: USER_SERVICE_URL
+          value: "http://nitroerp-user-service:3002"
+        - name: COMPANY_SERVICE_URL
+          value: "http://nitroerp-company-service:3003"
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3010
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 3010
+          initialDelaySeconds: 5
+          periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nitroerp-financial-service
+  namespace: nitroerp
+spec:
+  selector:
+    app: nitroerp-financial-service
+  ports:
+  - port: 3010
+    targetPort: 3010
+  type: ClusterIP
+---
+# HR Module
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nitroerp-hr-service
+  namespace: nitroerp
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: nitroerp-hr-service
+  template:
+    metadata:
+      labels:
+        app: nitroerp-hr-service
+    spec:
+      containers:
+      - name: hr-service
+        image: nitroerp/hr-service:latest
+        ports:
+        - containerPort: 3020
+        envFrom:
+        - configMapRef:
+            name: nitroerp-config
+        - secretRef:
+            name: nitroerp-secrets
+        env:
+        - name: PORT
+          value: "3020"
+        - name: AUTH_SERVICE_URL
+          value: "http://nitroerp-auth-service:3001"
+        - name: USER_SERVICE_URL
+          value: "http://nitroerp-user-service:3002"
+        - name: COMPANY_SERVICE_URL
+          value: "http://nitroerp-company-service:3003"
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3020
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 3020
+          initialDelaySeconds: 5
+          periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nitroerp-hr-service
+  namespace: nitroerp
+spec:
+  selector:
+    app: nitroerp-hr-service
+  ports:
+  - port: 3020
+    targetPort: 3020
+  type: ClusterIP
+---
+# Engineering Module
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nitroerp-engineering-service
+  namespace: nitroerp
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: nitroerp-engineering-service
+  template:
+    metadata:
+      labels:
+        app: nitroerp-engineering-service
+    spec:
+      containers:
+      - name: engineering-service
+        image: nitroerp/engineering-service:latest
+        ports:
+        - containerPort: 3030
+        envFrom:
+        - configMapRef:
+            name: nitroerp-config
+        - secretRef:
+            name: nitroerp-secrets
+        env:
+        - name: PORT
+          value: "3030"
+        - name: AUTH_SERVICE_URL
+          value: "http://nitroerp-auth-service:3001"
+        - name: USER_SERVICE_URL
+          value: "http://nitroerp-user-service:3002"
+        - name: COMPANY_SERVICE_URL
+          value: "http://nitroerp-company-service:3003"
+        - name: MINIO_ACCESS_KEY
+          value: "nitroerp"
+        - name: MINIO_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: nitroerp-secrets
+              key: MINIO_PASSWORD
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3030
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 3030
+          initialDelaySeconds: 5
+          periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nitroerp-engineering-service
+  namespace: nitroerp
+spec:
+  selector:
+    app: nitroerp-engineering-service
+  ports:
+  - port: 3030
+    targetPort: 3030
+  type: ClusterIP
+---
+# Manufacturing Module
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nitroerp-manufacturing-service
+  namespace: nitroerp
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: nitroerp-manufacturing-service
+  template:
+    metadata:
+      labels:
+        app: nitroerp-manufacturing-service
+    spec:
+      containers:
+      - name: manufacturing-service
+        image: nitroerp/manufacturing-service:latest
+        ports:
+        - containerPort: 3040
+        envFrom:
+        - configMapRef:
+            name: nitroerp-config
+        - secretRef:
+            name: nitroerp-secrets
+        env:
+        - name: PORT
+          value: "3040"
+        - name: AUTH_SERVICE_URL
+          value: "http://nitroerp-auth-service:3001"
+        - name: USER_SERVICE_URL
+          value: "http://nitroerp-user-service:3002"
+        - name: COMPANY_SERVICE_URL
+          value: "http://nitroerp-company-service:3003"
+        - name: ENGINEERING_SERVICE_URL
+          value: "http://nitroerp-engineering-service:3030"
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3040
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 3040
+          initialDelaySeconds: 5
+          periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nitroerp-manufacturing-service
+  namespace: nitroerp
+spec:
+  selector:
+    app: nitroerp-manufacturing-service
+  ports:
+  - port: 3040
+    targetPort: 3040
+  type: ClusterIP
+---
+# =====================================================
+# HORIZONTAL POD AUTOSCALERS
+# =====================================================
+
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: nitroerp-api-gateway-hpa
+  namespace: nitroerp
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: nitroerp-api-gateway
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: nitroerp-financial-service-hpa
+  namespace: nitroerp
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: nitroerp-financial-service
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+---
+# =====================================================
+# INGRESS (Optional - for external access)
+# =====================================================
+
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: nitroerp-ingress
+  namespace: nitroerp
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  tls:
+  - hosts:
+    - nitroerp.yourdomain.com
+    secretName: nitroerp-tls
+  rules:
+  - host: nitroerp.yourdomain.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: nitroerp-api-gateway
+            port:
+              number: 80 

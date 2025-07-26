@@ -1,0 +1,525 @@
+version: '3.8'
+
+networks:
+  nitroerp-core:
+    driver: bridge
+  nitroerp-business:
+    driver: bridge
+  nitroerp-infrastructure:
+    driver: bridge
+
+services:
+  # =====================================================
+  # INFRASTRUCTURE SERVICES (Always Required)
+  # =====================================================
+  
+  # Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: nitroerp-postgres
+    environment:
+      POSTGRES_DB: nitroerp
+      POSTGRES_USER: nitroerp_user
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-password}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --lc-collate=C --lc-ctype=C"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./src/database/schema:/docker-entrypoint-initdb.d
+    ports:
+      - "5432:5432"
+    networks:
+      - nitroerp-infrastructure
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nitroerp_user -d nitroerp"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: nitroerp-redis
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - nitroerp-infrastructure
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Message Queue
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: nitroerp-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: nitroerp
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-password}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    networks:
+      - nitroerp-infrastructure
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # File Storage
+  minio:
+    image: minio/minio:latest
+    container_name: nitroerp-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: nitroerp
+      MINIO_ROOT_PASSWORD: ${MINIO_PASSWORD:-password}
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    networks:
+      - nitroerp-infrastructure
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # =====================================================
+  # CORE SERVICES (Always Required)
+  # =====================================================
+
+  # API Gateway
+  api-gateway:
+    build:
+      context: .
+      dockerfile: ./src/infrastructure/api-gateway/Dockerfile
+    container_name: nitroerp-api-gateway
+    environment:
+      - NODE_ENV=${NODE_ENV:-development}
+      - PORT=80
+      - AUTH_SERVICE_URL=http://auth-service:3001
+      - USER_SERVICE_URL=http://user-service:3002
+      - COMPANY_SERVICE_URL=http://company-service:3003
+      - FINANCIAL_SERVICE_URL=http://financial-service:3010
+      - HR_SERVICE_URL=http://hr-service:3020
+      - ENGINEERING_SERVICE_URL=http://engineering-service:3030
+      - MANUFACTURING_SERVICE_URL=http://manufacturing-service:3040
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - auth-service
+      - user-service
+      - company-service
+    networks:
+      - nitroerp-core
+      - nitroerp-business
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Authentication Service
+  auth-service:
+    build:
+      context: .
+      dockerfile: ./src/core/auth-service/Dockerfile
+    container_name: nitroerp-auth-service
+    environment:
+      - NODE_ENV=${NODE_ENV:-development}
+      - PORT=3001
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=nitroerp
+      - DB_USER=nitroerp_user
+      - DB_PASSWORD=${DB_PASSWORD:-password}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - JWT_SECRET=${JWT_SECRET:-your-secret-key}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - nitroerp-core
+      - nitroerp-infrastructure
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # User Service
+  user-service:
+    build:
+      context: .
+      dockerfile: ./src/core/user-service/Dockerfile
+    container_name: nitroerp-user-service
+    environment:
+      - NODE_ENV=${NODE_ENV:-development}
+      - PORT=3002
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=nitroerp
+      - DB_USER=nitroerp_user
+      - DB_PASSWORD=${DB_PASSWORD:-password}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - nitroerp-core
+      - nitroerp-infrastructure
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Company Service
+  company-service:
+    build:
+      context: .
+      dockerfile: ./src/core/company-service/Dockerfile
+    container_name: nitroerp-company-service
+    environment:
+      - NODE_ENV=${NODE_ENV:-development}
+      - PORT=3003
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=nitroerp
+      - DB_USER=nitroerp_user
+      - DB_PASSWORD=${DB_PASSWORD:-password}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - nitroerp-core
+      - nitroerp-infrastructure
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3003/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Notification Service
+  notification-service:
+    build:
+      context: .
+      dockerfile: ./src/core/notification-service/Dockerfile
+    container_name: nitroerp-notification-service
+    environment:
+      - NODE_ENV=${NODE_ENV:-development}
+      - PORT=3004
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=nitroerp
+      - DB_USER=nitroerp_user
+      - DB_PASSWORD=${DB_PASSWORD:-password}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_PORT=5672
+      - RABBITMQ_USER=nitroerp
+      - RABBITMQ_PASS=${RABBITMQ_PASSWORD:-password}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - nitroerp-core
+      - nitroerp-infrastructure
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3004/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Audit Service
+  audit-service:
+    build:
+      context: .
+      dockerfile: ./src/core/audit-service/Dockerfile
+    container_name: nitroerp-audit-service
+    environment:
+      - NODE_ENV=${NODE_ENV:-development}
+      - PORT=3005
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=nitroerp
+      - DB_USER=nitroerp_user
+      - DB_PASSWORD=${DB_PASSWORD:-password}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - nitroerp-core
+      - nitroerp-infrastructure
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3005/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # =====================================================
+  # BUSINESS MODULES (Optional - Deploy as needed)
+  # =====================================================
+
+  # Financial Module
+  financial-service:
+    build:
+      context: .
+      dockerfile: ./src/modules/financial-module/Dockerfile
+    container_name: nitroerp-financial-service
+    environment:
+      - NODE_ENV=${NODE_ENV:-development}
+      - PORT=3010
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=nitroerp
+      - DB_USER=nitroerp_user
+      - DB_PASSWORD=${DB_PASSWORD:-password}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - AUTH_SERVICE_URL=http://auth-service:3001
+      - USER_SERVICE_URL=http://user-service:3002
+      - COMPANY_SERVICE_URL=http://company-service:3003
+      - SARB_API_URL=${SARB_API_URL:-https://www.resbank.co.za/api/exchangerates}
+      - ECB_API_URL=${ECB_API_URL:-https://api.exchangerate.host/latest}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      auth-service:
+        condition: service_healthy
+      user-service:
+        condition: service_healthy
+      company-service:
+        condition: service_healthy
+    networks:
+      - nitroerp-business
+      - nitroerp-infrastructure
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3010/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    profiles:
+      - financial
+
+  # HR Module
+  hr-service:
+    build:
+      context: .
+      dockerfile: ./src/modules/hr-module/Dockerfile
+    container_name: nitroerp-hr-service
+    environment:
+      - NODE_ENV=${NODE_ENV:-development}
+      - PORT=3020
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=nitroerp
+      - DB_USER=nitroerp_user
+      - DB_PASSWORD=${DB_PASSWORD:-password}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - AUTH_SERVICE_URL=http://auth-service:3001
+      - USER_SERVICE_URL=http://user-service:3002
+      - COMPANY_SERVICE_URL=http://company-service:3003
+      - NOTIFICATION_SERVICE_URL=http://notification-service:3004
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      auth-service:
+        condition: service_healthy
+      user-service:
+        condition: service_healthy
+      company-service:
+        condition: service_healthy
+      notification-service:
+        condition: service_healthy
+    networks:
+      - nitroerp-business
+      - nitroerp-infrastructure
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3020/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    profiles:
+      - hr
+
+  # Engineering Module
+  engineering-service:
+    build:
+      context: .
+      dockerfile: ./src/modules/engineering-module/Dockerfile
+    container_name: nitroerp-engineering-service
+    environment:
+      - NODE_ENV=${NODE_ENV:-development}
+      - PORT=3030
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=nitroerp
+      - DB_USER=nitroerp_user
+      - DB_PASSWORD=${DB_PASSWORD:-password}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - MINIO_HOST=minio
+      - MINIO_PORT=9000
+      - MINIO_ACCESS_KEY=nitroerp
+      - MINIO_SECRET_KEY=${MINIO_PASSWORD:-password}
+      - AUTH_SERVICE_URL=http://auth-service:3001
+      - USER_SERVICE_URL=http://user-service:3002
+      - COMPANY_SERVICE_URL=http://company-service:3003
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      auth-service:
+        condition: service_healthy
+      user-service:
+        condition: service_healthy
+      company-service:
+        condition: service_healthy
+    networks:
+      - nitroerp-business
+      - nitroerp-infrastructure
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3030/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    profiles:
+      - engineering
+
+  # Manufacturing Module
+  manufacturing-service:
+    build:
+      context: .
+      dockerfile: ./src/modules/manufacturing-module/Dockerfile
+    container_name: nitroerp-manufacturing-service
+    environment:
+      - NODE_ENV=${NODE_ENV:-development}
+      - PORT=3040
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=nitroerp
+      - DB_USER=nitroerp_user
+      - DB_PASSWORD=${DB_PASSWORD:-password}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_PORT=5672
+      - RABBITMQ_USER=nitroerp
+      - RABBITMQ_PASS=${RABBITMQ_PASSWORD:-password}
+      - AUTH_SERVICE_URL=http://auth-service:3001
+      - USER_SERVICE_URL=http://user-service:3002
+      - COMPANY_SERVICE_URL=http://company-service:3003
+      - ENGINEERING_SERVICE_URL=http://engineering-service:3030
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      auth-service:
+        condition: service_healthy
+      user-service:
+        condition: service_healthy
+      company-service:
+        condition: service_healthy
+    networks:
+      - nitroerp-business
+      - nitroerp-infrastructure
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3040/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    profiles:
+      - manufacturing
+
+  # =====================================================
+  # MONITORING & LOGGING (Optional)
+  # =====================================================
+
+  # Prometheus
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: nitroerp-prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - nitroerp-infrastructure
+    profiles:
+      - monitoring
+
+  # Grafana
+  grafana:
+    image: grafana/grafana:latest
+    container_name: nitroerp-grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - nitroerp-infrastructure
+    profiles:
+      - monitoring
+
+volumes:
+  postgres_data:
+  redis_data:
+  rabbitmq_data:
+  minio_data:
+  prometheus_data:
+  grafana_data: 

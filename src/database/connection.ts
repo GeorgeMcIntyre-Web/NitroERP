@@ -1,8 +1,10 @@
 import knex from 'knex';
-import { dbLogger } from '../utils/logger';
-import databaseConfig from '../../config/database';
+import databaseConfig from '../config/database';
+import { logger } from '../utils/logger';
 
-let db: knex.Knex;
+const dbLogger = logger.child({ module: 'database' });
+
+let db: knex.Knex | undefined;
 
 /**
  * Initialize database connection
@@ -21,10 +23,11 @@ export const initializeDatabase = async (): Promise<void> => {
     // Test the connection
     await db.raw('SELECT 1');
     
+    const connection = config.connection as any;
     dbLogger.info('Database connection established successfully', {
       environment,
-      host: config.connection?.host,
-      database: config.connection?.database,
+      host: connection?.host,
+      database: connection?.database,
     });
 
     // Set up connection event handlers
@@ -106,11 +109,10 @@ export const runMigrations = async (): Promise<void> => {
 export const runSeeds = async (): Promise<void> => {
   try {
     const database = getDatabase();
-    const [batchNo, log] = await database.seed.run();
+    const result = await database.seed.run();
     
     dbLogger.info('Database seeds completed', {
-      batchNo,
-      seeds: log,
+      result,
     });
   } catch (error) {
     dbLogger.error('Failed to run database seeds', {
